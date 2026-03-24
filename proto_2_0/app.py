@@ -3,6 +3,7 @@ app.py - Panel_y Proto #2.0 — 実用ビューア + ドロップダウン行UI
 
 Proto #1（ファイル選択・計測モード・カーソル差分・ホバー同期・ズーム同期）
 + Proto #0.4（行ごとドロップダウンで複数チャンネル重ね表示）を統合。
++ Proto #2.1: チャンネルごとの line/step 表示切り替え機能。
 
 アーキテクチャ:
   - 各行は独立した go.Figure()（make_subplotsは使わない）
@@ -82,17 +83,23 @@ def make_row_fig(
     ymin: float | None = None,
     ymax: float | None = None,
     lock_y: bool = False,
+    step_chs: set[str] | None = None,
 ) -> go.Figure:
     """行1つ分の Figure を生成する。複数チャンネル重ね表示対応。"""
     fig = go.Figure()
     for j, ch in enumerate(chs):
         if ch in df.columns:
+            line_shape = "hv" if (step_chs and ch in step_chs) else "linear"
             fig.add_trace(go.Scatter(
                 x=df["time"],
                 y=df[ch],
                 mode="lines",
                 name=ch,
-                line=dict(width=1, color=TRACE_COLORS[j % len(TRACE_COLORS)]),
+                line=dict(
+                    width=1,
+                    color=TRACE_COLORS[j % len(TRACE_COLORS)],
+                    shape=line_shape,
+                ),
                 hoverinfo="none",
             ))
 
@@ -140,6 +147,7 @@ def waveform_row(
     scroll_zoom: bool = False,
     ymin: float | None = None,
     ymax: float | None = None,
+    step_chs: set[str] | None = None,
 ) -> html.Div:
     """波形1行分のレイアウト（ラベル列 + グラフ）を生成する。"""
     label = " / ".join(chs)
@@ -161,7 +169,7 @@ def waveform_row(
             id={"type": "wf-graph", "row": row_index},
             figure=make_row_fig(
                 chs, show_xaxis=is_last, ymin=ymin, ymax=ymax,
-                lock_y=scroll_zoom,
+                lock_y=scroll_zoom, step_chs=step_chs,
             ),
             config={
                 "scrollZoom": scroll_zoom,
@@ -190,7 +198,11 @@ YAXIS_INPUT_STYLE = {
 }
 
 
-def make_dropdown_row(row_index: int, selected: list[str] | None = None) -> html.Div:
+def make_dropdown_row(
+    row_index: int,
+    selected: list[str] | None = None,
+    step_selected: list[str] | None = None,
+) -> html.Div:
     """1行分のドロップダウン行UIを生成する。"""
     ch_options = [{"label": ch, "value": ch} for ch in channels]
     return html.Div(
@@ -200,8 +212,8 @@ def make_dropdown_row(row_index: int, selected: list[str] | None = None) -> html
                 style={
                     "color": "#aaa",
                     "fontSize": "12px",
-                    "minWidth": "32px",
-                    "marginRight": "8px",
+                    "minWidth": "28px",
+                    "marginRight": "6px",
                     "alignSelf": "center",
                 },
             ),
@@ -210,9 +222,29 @@ def make_dropdown_row(row_index: int, selected: list[str] | None = None) -> html
                 options=ch_options,
                 value=selected or [],
                 multi=True,
-                placeholder="チャンネルを選択...",
-                style={"flex": "1", "minWidth": "200px"},
+                placeholder="ch選択...",
+                style={"flex": "2", "minWidth": "140px"},
             ),
+            # step表示チャンネル選択
+            html.Div([
+                html.Span("step:", style={
+                    "color": "#888", "fontSize": "11px", "marginRight": "4px",
+                    "whiteSpace": "nowrap",
+                }),
+                dcc.Dropdown(
+                    id={"type": "step-channels", "index": row_index},
+                    options=ch_options,
+                    value=step_selected or [],
+                    multi=True,
+                    placeholder="ch...",
+                    style={"flex": "1", "minWidth": "100px"},
+                ),
+            ], style={
+                "display": "flex",
+                "alignItems": "center",
+                "marginLeft": "8px",
+                "flex": "1",
+            }),
             # Y軸範囲指定
             html.Div([
                 html.Span("Y:", style={
@@ -407,7 +439,7 @@ app.layout = html.Div([
         html.Div(id="rows-container", children=[]),
     ], style={
         "padding": "12px 16px",
-        "maxWidth": "600px",
+        "maxWidth": "900px",
         "borderBottom": ROW_BORDER,
     }),
 
@@ -642,9 +674,10 @@ def toggle_measure(n_clicks):
     State({"type": "row-dropdown", "index": ALL}, "value"),
     State({"type": "ymin-input", "index": ALL}, "value"),
     State({"type": "ymax-input", "index": ALL}, "value"),
+    State({"type": "step-channels", "index": ALL}, "value"),
     prevent_initial_call=True,
 )
-def update_waveform_rows(n_clicks, scroll_zoom, all_values, all_ymin, all_ymax):
+def update_waveform_rows(n_clicks, scroll_zoom, all_values, all_ymin, all_ymax, all_step):
     """ドロップダウンの値から波形行を生成する。"""
     if not all_values:
         return html.Div(
@@ -652,15 +685,17 @@ def update_waveform_rows(n_clicks, scroll_zoom, all_values, all_ymin, all_ymax):
             style={"color": "#888", "padding": "20px"},
         ), []
 
-    # 空でない行だけ抽出（対応するymin/ymaxも連動）
+    # 空でない行だけ抽出（対応するymin/ymax/stepも連動）
     row_groups = []
     ymin_list = []
     ymax_list = []
+    step_list = []
     for i, v in enumerate(all_values):
         if v:
             row_groups.append(v)
             ymin_list.append(all_ymin[i] if i < len(all_ymin) else None)
             ymax_list.append(all_ymax[i] if i < len(all_ymax) else None)
+            step_list.append(set(all_step[i]) if i < len(all_step) and all_step[i] else set())
 
     if not row_groups or df is None:
         return html.Div(
@@ -693,6 +728,7 @@ def update_waveform_rows(n_clicks, scroll_zoom, all_values, all_ymin, all_ymax):
             scroll_zoom=scroll_zoom,
             ymin=ymin_list[i],
             ymax=ymax_list[i],
+            step_chs=step_list[i],
         ))
 
     return rows, row_groups
