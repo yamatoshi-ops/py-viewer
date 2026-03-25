@@ -40,10 +40,20 @@ DATA_DIR = Path(__file__).parent / "data"
 DARK_BG = "#1a1a1a"
 ROW_BORDER = "1px solid #333"
 
-TRACE_COLORS = [
-    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
-    "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
-]
+COLOR_PALETTE = {
+    "blue": "#1f77b4",
+    "orange": "#ff7f0e",
+    "green": "#2ca02c",
+    "red": "#d62728",
+    "purple": "#9467bd",
+    "brown": "#8c564b",
+    "pink": "#e377c2",
+    "gray": "#7f7f7f",
+    "yellow": "#bcbd22",
+    "cyan": "#17becf",
+}
+COLOR_OPTIONS = [{"label": name, "value": code} for name, code in COLOR_PALETTE.items()]
+TRACE_COLORS = list(COLOR_PALETTE.values())
 
 BTN_STYLE = {
     "padding": "6px 16px",
@@ -56,14 +66,16 @@ BTN_STYLE = {
 }
 
 LABEL_COL_STYLE = {
-    "width": "140px",
-    "minWidth": "140px",
+    "width": "200px",
+    "minWidth": "80px",
     "padding": "8px 14px",
     "display": "flex",
     "flexDirection": "column",
     "justifyContent": "center",
     "borderRight": ROW_BORDER,
     "fontFamily": "monospace",
+    "resize": "horizontal",
+    "overflow": "hidden",
 }
 
 # ---------------------------------------------------------------------------
@@ -84,20 +96,24 @@ def make_row_fig(
     ymax: float | None = None,
     lock_y: bool = False,
     step_chs: set[str] | None = None,
+    ch_styles: dict[str, dict] | None = None,
 ) -> go.Figure:
     """行1つ分の Figure を生成する。複数チャンネル重ね表示対応。"""
     fig = go.Figure()
     for j, ch in enumerate(chs):
         if ch in df.columns:
             line_shape = "hv" if (step_chs and ch in step_chs) else "linear"
+            style = ch_styles.get(ch, {}) if ch_styles else {}
+            color = style.get("color", TRACE_COLORS[j % len(TRACE_COLORS)])
+            width = style.get("width", 1)
             fig.add_trace(go.Scatter(
                 x=df["time"],
                 y=df[ch],
                 mode="lines",
                 name=ch,
                 line=dict(
-                    width=1,
-                    color=TRACE_COLORS[j % len(TRACE_COLORS)],
+                    width=width,
+                    color=color,
                     shape=line_shape,
                 ),
                 hoverinfo="none",
@@ -122,12 +138,7 @@ def make_row_fig(
         height=GRAPH_HEIGHT,
         margin=dict(t=8, b=30 if show_xaxis else 8, l=60, r=10),
         template="plotly_dark",
-        showlegend=len(chs) > 1,
-        legend=dict(
-            orientation="h", y=1.02, x=0,
-            font=dict(size=10),
-            bgcolor="rgba(0,0,0,0)",
-        ),
+        showlegend=False,
         hovermode="x",
         xaxis=dict(
             showticklabels=show_xaxis,
@@ -148,6 +159,7 @@ def waveform_row(
     ymin: float | None = None,
     ymax: float | None = None,
     step_chs: set[str] | None = None,
+    ch_styles: dict[str, dict] | None = None,
 ) -> html.Div:
     """波形1行分のレイアウト（ラベル列 + グラフ）を生成する。"""
     label = " / ".join(chs)
@@ -169,7 +181,7 @@ def waveform_row(
             id={"type": "wf-graph", "row": row_index},
             figure=make_row_fig(
                 chs, show_xaxis=is_last, ymin=ymin, ymax=ymax,
-                lock_y=scroll_zoom, step_chs=step_chs,
+                lock_y=scroll_zoom, step_chs=step_chs, ch_styles=ch_styles,
             ),
             config={
                 "scrollZoom": scroll_zoom,
@@ -196,6 +208,47 @@ YAXIS_INPUT_STYLE = {
     "fontFamily": "monospace",
     "fontSize": "12px",
 }
+
+
+def make_ch_settings(ch_list: list[str]) -> list:
+    """チャンネルごとの色・太さ設定UIを生成する。"""
+    rows = []
+    for i, ch in enumerate(ch_list):
+        default_color = TRACE_COLORS[i % len(TRACE_COLORS)]
+        rows.append(html.Div([
+            html.Span(ch, style={
+                "color": "#aaa", "fontSize": "12px", "fontFamily": "monospace",
+                "minWidth": "100px", "marginRight": "8px",
+            }),
+            html.Span("色:", style={"color": "#888", "fontSize": "11px", "marginRight": "4px"}),
+            dcc.Dropdown(
+                id={"type": "ch-color", "ch": ch},
+                options=COLOR_OPTIONS,
+                value=default_color,
+                clearable=False,
+                style={"width": "100px"},
+            ),
+            html.Span("太さ:", style={
+                "color": "#888", "fontSize": "11px", "marginLeft": "12px", "marginRight": "4px",
+            }),
+            dcc.Input(
+                id={"type": "ch-width", "ch": ch},
+                type="number",
+                value=1,
+                min=0.5,
+                max=5,
+                step=0.5,
+                style={
+                    "width": "50px", "padding": "2px 4px",
+                    "backgroundColor": "#2a2a2a", "color": "#eee",
+                    "border": "1px solid #555", "borderRadius": "4px",
+                    "fontFamily": "monospace", "fontSize": "12px",
+                },
+            ),
+        ], style={
+            "display": "flex", "alignItems": "center", "padding": "3px 0",
+        }))
+    return rows
 
 
 def make_dropdown_row(
@@ -443,6 +496,18 @@ app.layout = html.Div([
         "borderBottom": ROW_BORDER,
     }),
 
+    # ━━━ チャンネル設定パネル（折りたたみ） ━━━
+    html.Details([
+        html.Summary("チャンネル設定（色・太さ）", style={
+            "color": "#aaa", "fontSize": "12px", "cursor": "pointer",
+            "padding": "6px 0", "fontFamily": "monospace",
+        }),
+        html.Div(id="ch-settings-container", children=[]),
+    ], style={
+        "padding": "4px 16px",
+        "borderBottom": ROW_BORDER,
+    }),
+
     # ━━━ 差分表示パネル ━━━
     html.Div(id="delta-panel", style={"display": "none"}),
 
@@ -517,22 +582,23 @@ def on_suggestion_click(n_clicks_list):
     Output("row-count", "data", allow_duplicate=True),
     Output("cursor-a-store", "data", allow_duplicate=True),
     Output("cursor-b-store", "data", allow_duplicate=True),
+    Output("ch-settings-container", "children"),
     Input("load-btn", "n_clicks"),
     State("file-path-input", "value"),
     prevent_initial_call=True,
 )
 def load_file(n_clicks, file_path):
     if not n_clicks or not file_path:
-        return (no_update,) * 6
+        return (no_update,) * 7
 
     path = Path(file_path)
 
     if not path.exists():
-        return no_update, "❌ ファイルが見つかりません", no_update, no_update, no_update, no_update
+        return no_update, "❌ ファイルが見つかりません", no_update, no_update, no_update, no_update, no_update
     if path.is_dir():
-        return no_update, "❌ ディレクトリです", no_update, no_update, no_update, no_update
+        return no_update, "❌ ディレクトリです", no_update, no_update, no_update, no_update, no_update
     if path.suffix.lower() != ".parquet":
-        return no_update, "❌ .parquet を指定してください", no_update, no_update, no_update, no_update
+        return no_update, "❌ .parquet を指定してください", no_update, no_update, no_update, no_update, no_update
 
     global df, channels
     df = pd.read_parquet(path)
@@ -541,7 +607,7 @@ def load_file(n_clicks, file_path):
     if not channels:
         df = None
         channels = []
-        return no_update, "❌ 波形チャンネルがありません", no_update, no_update, no_update, no_update
+        return no_update, "❌ 波形チャンネルがありません", no_update, no_update, no_update, no_update, no_update
 
     n = len(df)
     ts = df["time"].iloc[1] - df["time"].iloc[0]
@@ -551,6 +617,9 @@ def load_file(n_clicks, file_path):
     initial_channels = channels[:8]
     row_divs = [make_dropdown_row(i, [ch]) for i, ch in enumerate(initial_channels)]
 
+    # チャンネル設定パネル生成
+    ch_settings = make_ch_settings(channels)
+
     return (
         {"path": str(path), "channels": channels},
         status,
@@ -558,6 +627,7 @@ def load_file(n_clicks, file_path):
         len(initial_channels),
         None,
         None,
+        ch_settings,
     )
 
 
@@ -675,15 +745,30 @@ def toggle_measure(n_clicks):
     State({"type": "ymin-input", "index": ALL}, "value"),
     State({"type": "ymax-input", "index": ALL}, "value"),
     State({"type": "step-channels", "index": ALL}, "value"),
+    State({"type": "ch-color", "ch": ALL}, "value"),
+    State({"type": "ch-width", "ch": ALL}, "value"),
+    State({"type": "ch-color", "ch": ALL}, "id"),
     prevent_initial_call=True,
 )
-def update_waveform_rows(n_clicks, scroll_zoom, all_values, all_ymin, all_ymax, all_step):
+def update_waveform_rows(
+    n_clicks, scroll_zoom, all_values, all_ymin, all_ymax, all_step,
+    all_colors, all_widths, all_color_ids,
+):
     """ドロップダウンの値から波形行を生成する。"""
     if not all_values:
         return html.Div(
             "チャンネルが選択されていません",
             style={"color": "#888", "padding": "20px"},
         ), []
+
+    # チャンネルスタイル辞書を構築
+    ch_styles = {}
+    for i, cid in enumerate(all_color_ids or []):
+        ch_name = cid["ch"]
+        ch_styles[ch_name] = {
+            "color": all_colors[i] if i < len(all_colors) else TRACE_COLORS[0],
+            "width": all_widths[i] if i < len(all_widths) and all_widths[i] else 1,
+        }
 
     # 空でない行だけ抽出（対応するymin/ymax/stepも連動）
     row_groups = []
@@ -695,7 +780,8 @@ def update_waveform_rows(n_clicks, scroll_zoom, all_values, all_ymin, all_ymax, 
             row_groups.append(v)
             ymin_list.append(all_ymin[i] if i < len(all_ymin) else None)
             ymax_list.append(all_ymax[i] if i < len(all_ymax) else None)
-            step_list.append(set(all_step[i]) if i < len(all_step) and all_step[i] else set())
+            raw_step = all_step[i] if i < len(all_step) else None
+            step_list.append(set(raw_step) if raw_step and isinstance(raw_step, list) else set())
 
     if not row_groups or df is None:
         return html.Div(
@@ -707,7 +793,7 @@ def update_waveform_rows(n_clicks, scroll_zoom, all_values, all_ymin, all_ymax, 
         # ヘッダー行
         html.Div([
             html.Div("Channel / Value", style={
-                "width": "140px", "padding": "4px 14px",
+                "width": "200px", "padding": "4px 14px",
                 "borderRight": ROW_BORDER, "color": "#666",
                 "fontFamily": "monospace", "fontSize": "11px",
             }),
@@ -729,6 +815,7 @@ def update_waveform_rows(n_clicks, scroll_zoom, all_values, all_ymin, all_ymax, 
             ymin=ymin_list[i],
             ymax=ymax_list[i],
             step_chs=step_list[i],
+            ch_styles=ch_styles,
         ))
 
     return rows, row_groups
@@ -743,9 +830,10 @@ def update_waveform_rows(n_clicks, scroll_zoom, all_values, all_ymin, all_ymax, 
     prevent_initial_call=True,
 )
 def store_hover_x(hover_datas):
-    for hd in hover_datas:
-        if hd and hd.get("points"):
-            return hd["points"][0]["x"]
+    for t in ctx.triggered:
+        val = t.get("value")
+        if val and isinstance(val, dict) and val.get("points"):
+            return val["points"][0]["x"]
     return no_update
 
 
@@ -770,11 +858,16 @@ def update_values(x_val, val_ids, row_groups):
     for i, vid in enumerate(val_ids):
         if i < len(row_groups):
             group = row_groups[i]
-            vals = []
-            for ch in group:
+            spans = []
+            for j, ch in enumerate(group):
                 if ch in df.columns:
-                    vals.append(f"{ch}={df[ch].iloc[idx]:.4f}")
-            results.append("  ".join(vals) if vals else "---")
+                    color = TRACE_COLORS[j % len(TRACE_COLORS)]
+                    val = df[ch].iloc[idx]
+                    spans.append(html.Span(
+                        f"● {val:.4g}",
+                        style={"color": color, "marginRight": "6px", "fontSize": "13px"},
+                    ))
+            results.append(html.Div(spans) if spans else "---")
         else:
             results.append("---")
     return results
