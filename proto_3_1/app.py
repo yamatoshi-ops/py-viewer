@@ -437,6 +437,68 @@ app.layout = html.Div([
     # ━━━ 差分表示パネル ━━━
     html.Div(id="delta-panel", style={"display": "none"}),
 
+    # ━━━ FFT コントロール ━━━
+    html.Div([
+        html.Button("FFT", id="fft-btn", n_clicks=0,
+                    className="btn btn-accent"),
+        html.Div([
+            html.Span("ch:", className="ch-label-text"),
+            dcc.Dropdown(
+                id="fft-ch-dropdown",
+                options=[], value=[], multi=True,
+                placeholder="ch選択（最大3）...",
+                style={"width": "260px"},
+            ),
+        ], style={"display": "flex", "alignItems": "center", "gap": "4px"}),
+        html.Div([
+            html.Span("Window:", className="ch-label-text"),
+            dcc.Dropdown(
+                id="fft-window-dropdown",
+                options=[
+                    {"label": "Hanning", "value": "hanning"},
+                    {"label": "Hamming", "value": "hamming"},
+                    {"label": "Rectangular", "value": "rectangular"},
+                ],
+                value="hanning", clearable=False,
+                style={"width": "130px"},
+            ),
+        ], style={"display": "flex", "alignItems": "center", "gap": "4px"}),
+        html.Div([
+            html.Span("Y:", className="ch-label-text"),
+            dcc.Dropdown(
+                id="fft-yscale-dropdown",
+                options=[
+                    {"label": "Amplitude", "value": "amplitude"},
+                    {"label": "dB", "value": "dB"},
+                ],
+                value="amplitude", clearable=False,
+                style={"width": "120px"},
+            ),
+        ], style={"display": "flex", "alignItems": "center", "gap": "4px"}),
+        html.Div([
+            html.Span("Freq:", className="ch-label-text"),
+            dcc.Input(
+                id="fft-fmin-input", type="number", placeholder="min",
+                debounce=True, className="input-field",
+                style={"width": "80px"},
+            ),
+            html.Span("~", className="ch-label-text",
+                       style={"margin": "0 2px"}),
+            dcc.Input(
+                id="fft-fmax-input", type="number", placeholder="max",
+                debounce=True, className="input-field",
+                style={"width": "80px"},
+            ),
+            html.Span("Hz", className="ch-label-text"),
+        ], style={"display": "flex", "alignItems": "center", "gap": "4px"}),
+    ], id="fft-controls", style={"display": "none"}),
+
+    # ━━━ FFT スペクトル表示 ━━━
+    html.Div(id="fft-panel", children=[
+        dcc.Graph(id="fft-graph", style={"height": "300px"},
+                  config={"displayModeBar": "hover"}),
+    ], style={"display": "none"}),
+
     # ━━━ 波形表示コンテナ ━━━
     html.Div(id="waveform-container"),
 
@@ -996,9 +1058,12 @@ def set_cursor(click_datas, measure_on, cursor_a, cursor_b):
 @app.callback(
     Output("delta-panel", "children"),
     Output("delta-panel", "style"),
+    Output("fft-controls", "style"),
+    Output("fft-panel", "style", allow_duplicate=True),
     Input("cursor-a-store", "data"),
     Input("cursor-b-store", "data"),
     State("row-groups-store", "data"),
+    prevent_initial_call=True,
 )
 def update_delta_panel(cursor_a, cursor_b, row_groups):
     base_style = {
@@ -1010,11 +1075,20 @@ def update_delta_panel(cursor_a, cursor_b, row_groups):
         "color": "var(--text-primary)",
     }
 
+    fft_hidden = {"display": "none"}
+    fft_ctrl_style = {
+        "display": "flex", "alignItems": "center", "gap": "12px",
+        "padding": "8px 16px",
+        "backgroundColor": "var(--bg-secondary)",
+        "borderBottom": "1px solid var(--border)",
+    }
+
     if cursor_a is None and cursor_b is None:
         base_style["display"] = "none"
-        return [], base_style
+        return [], base_style, fft_hidden, fft_hidden
 
     base_style["display"] = "block"
+    both_cursors = cursor_a is not None and cursor_b is not None
     children = []
 
     # カーソル位置
@@ -1102,7 +1176,116 @@ def update_delta_panel(cursor_a, cursor_b, row_groups):
                 style={"marginTop": "6px", "borderCollapse": "collapse"},
             ))
 
-    return children, base_style
+    return (
+        children,
+        base_style,
+        fft_ctrl_style if both_cursors else fft_hidden,
+        fft_hidden,  # カーソル変更時は FFT パネルをリセット
+    )
+
+
+# ---------------------------------------------------------------------------
+# Callback: FFT チャンネル候補を更新
+# ---------------------------------------------------------------------------
+@app.callback(
+    Output("fft-ch-dropdown", "options"),
+    Output("fft-ch-dropdown", "value"),
+    Input("row-groups-store", "data"),
+)
+def update_fft_ch_options(row_groups):
+    if not row_groups:
+        return [], []
+    seen = set()
+    opts = []
+    for group in row_groups:
+        for ch in group:
+            if ch not in seen:
+                seen.add(ch)
+                opts.append({"label": ch, "value": ch})
+    # デフォルト: 先頭1チャンネルを選択
+    default = [opts[0]["value"]] if opts else []
+    return opts, default
+
+
+# ---------------------------------------------------------------------------
+# Callback: FFT 計算
+# ---------------------------------------------------------------------------
+@app.callback(
+    Output("fft-graph", "figure"),
+    Output("fft-panel", "style", allow_duplicate=True),
+    Input("fft-btn", "n_clicks"),
+    State("cursor-a-store", "data"),
+    State("cursor-b-store", "data"),
+    State("fft-ch-dropdown", "value"),
+    State("fft-window-dropdown", "value"),
+    State("fft-yscale-dropdown", "value"),
+    State("fft-fmin-input", "value"),
+    State("fft-fmax-input", "value"),
+    State("theme-store", "data"),
+    prevent_initial_call=True,
+)
+def compute_fft(n_clicks, cursor_a, cursor_b, selected_chs,
+                window_type, yscale, fmin, fmax, theme):
+    if not n_clicks or cursor_a is None or cursor_b is None:
+        return no_update, no_update
+    if df is None:
+        return no_update, no_update
+
+    # 選択チャンネル（最大3）
+    target_chs = (selected_chs or [])[:3]
+    if not target_chs:
+        return no_update, no_update
+
+    # 区間抽出
+    idx_a = (df["time"] - cursor_a).abs().idxmin()
+    idx_b = (df["time"] - cursor_b).abs().idxmin()
+    i_lo, i_hi = min(idx_a, idx_b), max(idx_a, idx_b) + 1
+    seg_time = df["time"].iloc[i_lo:i_hi].values
+    N = len(seg_time)
+    if N < 4:
+        return no_update, no_update
+    dt = seg_time[1] - seg_time[0]
+
+    # 窓関数
+    win_funcs = {"hanning": np.hanning, "hamming": np.hamming,
+                 "rectangular": np.ones}
+    w = win_funcs.get(window_type, np.hanning)(N)
+
+    # FFT 計算
+    freqs = np.fft.rfftfreq(N, d=dt)
+    fig = go.Figure()
+    for j, ch in enumerate(target_chs):
+        if ch not in df.columns:
+            continue
+        seg = df[ch].iloc[i_lo:i_hi].values
+        windowed = (seg - seg.mean()) * w  # DC除去 + 窓適用
+        spectrum = np.abs(np.fft.rfft(windowed)) * 2.0 / N
+        if yscale == "dB":
+            spectrum = 20 * np.log10(np.maximum(spectrum, 1e-12))
+        fig.add_trace(go.Scatter(
+            x=freqs, y=spectrum, mode="lines", name=ch,
+            line=dict(width=1, color=TRACE_COLORS[j % len(TRACE_COLORS)]),
+        ))
+
+    t = theme or DEFAULT_THEME
+    ylabel = "Amplitude" if yscale == "amplitude" else "Magnitude [dB]"
+    fig.update_layout(
+        height=300,
+        margin=dict(t=10, b=40, l=60, r=10),
+        template=PLOTLY_TEMPLATES.get(t, "plotly_dark"),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor=PLOT_BG.get(t, "#1a1a1a"),
+        xaxis=dict(
+            title="Frequency [Hz]",
+            range=[fmin or 0, fmax] if fmax else None,
+        ),
+        yaxis=dict(title=ylabel),
+        showlegend=True,
+        legend=dict(x=1, y=0.98, xanchor="right", yanchor="top",
+                    bgcolor="rgba(0,0,0,0.5)", font=dict(size=11)),
+        hovermode="x",
+    )
+    return fig, {"display": "block"}
 
 
 # ---------------------------------------------------------------------------

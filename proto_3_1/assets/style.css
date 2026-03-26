@@ -468,3 +468,19 @@ body {
 ::-webkit-scrollbar-thumb:hover {
     background: var(--text-secondary);
 }
+
+/* ===================================================================
+   FFT controls
+   =================================================================== */
+#fft-controls .Select-control {
+    min-height: 30px;
+}
+
+#fft-panel {
+    border-bottom: 1px solid var(--border);
+}
+
+#fft-panel .modebar-container {
+    left: 0 !important;
+    right: auto !important;
+}
