@@ -637,16 +637,15 @@ def load_file(n_clicks, file_path):
         return no_update, "❌ .parquet を指定してください", no_update, no_update, no_update, no_update, no_update
 
     global df, df_overview, time_arr_cache, channels
-    _df_raw = pd.read_parquet(path)
-    channels = [col for col in _df_raw.columns if col != "time"]
+    df = pd.read_parquet(path)
+    channels = [col for col in df.columns if col != "time"]
 
     if not channels:
         return no_update, "❌ 波形チャンネルがありません", no_update, no_update, no_update, no_update, no_update
 
     # float32 ダウンキャスト（メモリ半減）
-    df = _df_raw.copy()
-    df[channels] = df[channels].astype("float32")
-    del _df_raw
+    for ch in channels:
+        df[ch] = df[ch].astype("float32")
 
     # time軸キャッシュ（毎回 .values を呼ばないように）
     time_arr_cache = df["time"].values
