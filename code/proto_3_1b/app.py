@@ -73,19 +73,23 @@ OVERVIEW_POINTS = 10_000  # 全体表示用ダウンサンプル目標点数
 def minmax_envelope(time: np.ndarray, data: np.ndarray, n_buckets: int):
     """Min-Max envelope: バケットごとにmin/maxを保持し、ピークを欠落させずに圧縮する。
 
-    numpy reshape による完全vectorize実装（Pythonループなし）。
-    データ長がn_bucketsで割り切れない末尾は切り捨て（最大1バケット分のデータ欠落は許容）。
+    np.linspace でバケット境界を作成し、numpy.reduceat で完全vectorize集計する。
+    データ長がn_bucketsで割り切れない場合も末尾を切り捨てず、全点を対象にする。
 
     Returns (t_env, d_min, d_max) — 各バケットの代表時刻, 最小値, 最大値。
     """
     n = len(data)
-    # n_buckets で割り切れるよう末尾を切り捨て
-    n_trim = (n // n_buckets) * n_buckets
-    data_2d = data[:n_trim].reshape(n_buckets, -1)
-    time_2d = time[:n_trim].reshape(n_buckets, -1)
-    t_env = time_2d[:, 0]
-    d_min = data_2d.min(axis=1)
-    d_max = data_2d.max(axis=1)
+    idx = np.linspace(0, n, n_buckets + 1, dtype=int)
+    starts = idx[:-1]
+    ends = idx[1:]
+
+    # n_buckets > n のときに発生する空バケットを除外
+    valid = ends > starts
+    starts = starts[valid]
+
+    t_env = time[starts]
+    d_min = np.minimum.reduceat(data, starts)
+    d_max = np.maximum.reduceat(data, starts)
     return t_env, d_min, d_max
 
 
