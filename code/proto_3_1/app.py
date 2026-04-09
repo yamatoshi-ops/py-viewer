@@ -15,6 +15,7 @@ Proto #3.0 の全機能を継承し、Dark/Light テーマ切替を追加。
   python app.py → http://localhost:8050
 """
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -220,11 +221,12 @@ def waveform_row(
     ], className="wf-row")
 
 
-def make_ch_settings(ch_list: list[str]) -> list:
+def make_ch_settings(ch_list: list[str], ch_styles: dict | None = None) -> list:
     """チャンネルごとの色・太さ設定UIを生成する（2行レイアウト）。"""
     items = []
     for i, ch in enumerate(ch_list):
-        default_color = TRACE_COLORS[i % len(TRACE_COLORS)]
+        saved = (ch_styles or {}).get(ch, {})
+        default_color = saved.get("color", TRACE_COLORS[i % len(TRACE_COLORS)])
         items.append(html.Div([
             # 1行目: 変数名
             html.Div(ch, className="ch-name"),
@@ -242,7 +244,7 @@ def make_ch_settings(ch_list: list[str]) -> list:
                            style={"marginLeft": "10px"}),
                 dcc.Input(
                     id={"type": "ch-width", "ch": ch},
-                    type="number", value=1, min=0.5, max=5, step=0.5,
+                    type="number", value=saved.get("width", 1), min=0.5, max=5, step=0.5,
                     className="input-field",
                     style={"width": "46px"},
                 ),
@@ -359,6 +361,50 @@ def list_path_suggestions(path_str: str) -> list:
     return candidates[:30]
 
 
+def list_config_suggestions(path_str: str) -> list:
+    """作図ファイルパス候補（.pyc.json）を返す。"""
+    if not path_str:
+        path_str = str(DATA_DIR) + "/"
+
+    path = Path(path_str)
+
+    if path.is_file() and path.name.endswith(".pyc.json"):
+        return []
+
+    if path_str.endswith("/") and path.is_dir():
+        parent, prefix = path, ""
+    elif path.parent.is_dir():
+        parent, prefix = path.parent, path.name
+    else:
+        return []
+
+    candidates = []
+    try:
+        for p in sorted(parent.iterdir()):
+            if p.name.startswith("."):
+                continue
+            if prefix and not p.name.lower().startswith(prefix.lower()):
+                continue
+            if p.is_dir():
+                candidates.append(html.Button(
+                    f"📁 {p.name}/",
+                    id={"type": "cfg-suggestion", "path": str(p) + "/"},
+                    n_clicks=0,
+                    className="suggestion-item",
+                ))
+            elif p.name.endswith(".pyc.json"):
+                candidates.append(html.Button(
+                    f"📋 {p.name}",
+                    id={"type": "cfg-suggestion", "path": str(p)},
+                    n_clicks=0,
+                    className="suggestion-item suggestion-item-file",
+                ))
+    except PermissionError:
+        pass
+
+    return candidates[:30]
+
+
 # ---------------------------------------------------------------------------
 # Dash アプリ
 # ---------------------------------------------------------------------------
@@ -387,6 +433,31 @@ app.layout = html.Div([
             html.Button("読み込み", id="load-btn", n_clicks=0,
                         className="btn btn-accent", style={"marginLeft": "8px"}),
         ], style={"display": "flex", "alignItems": "center"}),
+
+        # ─ 作図ファイル ─
+        html.Div([
+            html.Div([
+                dcc.Input(
+                    id="config-path-input",
+                    type="text",
+                    value="",
+                    placeholder=".pyc.json パス...",
+                    debounce=False,
+                    className="input-path",
+                    style={"width": "220px"},
+                ),
+                html.Div(id="config-suggestions", style={"display": "none"}),
+            ], style={"position": "relative"}),
+            html.Button("💾", id="save-plotconfig-btn", n_clicks=0,
+                        className="btn", title="作図設定を保存",
+                        style={"marginLeft": "4px"}),
+            html.Button("📂", id="load-plotconfig-btn", n_clicks=0,
+                        className="btn btn-accent", title="作図設定をロード",
+                        style={"marginLeft": "4px"}),
+        ], style={"display": "flex", "alignItems": "center", "marginLeft": "16px"}),
+
+        html.Span(id="config-status", className="status-text",
+                  style={"marginLeft": "8px"}),
 
         # ─ スケールロック ─
         html.Button("🔒 スケール固定", id="scroll-zoom-btn", n_clicks=0,
@@ -560,6 +631,43 @@ def on_suggestion_click(n_clicks_list):
 
 
 # ---------------------------------------------------------------------------
+# Callback: 作図ファイルパス候補を表示
+# ---------------------------------------------------------------------------
+@app.callback(
+    Output("config-suggestions", "children"),
+    Output("config-suggestions", "style"),
+    Input("config-path-input", "value"),
+)
+def suggest_config_files(path_str):
+    suggestions = list_config_suggestions(path_str or "")
+    if not suggestions:
+        return [], {"display": "none"}
+    return suggestions, {
+        "display": "block",
+        "position": "absolute", "top": "100%", "left": "0",
+        "width": "420px", "zIndex": "1000",
+        "maxHeight": "300px", "overflowY": "auto",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Callback: 作図ファイル候補クリック → パス更新
+# ---------------------------------------------------------------------------
+@app.callback(
+    Output("config-path-input", "value", allow_duplicate=True),
+    Input({"type": "cfg-suggestion", "path": ALL}, "n_clicks"),
+    prevent_initial_call=True,
+)
+def on_config_suggestion_click(n_clicks_list):
+    if not any(n for n in n_clicks_list if n):
+        return no_update
+    triggered = ctx.triggered_id
+    if triggered and isinstance(triggered, dict):
+        return triggered["path"]
+    return no_update
+
+
+# ---------------------------------------------------------------------------
 # Callback: ファイル読み込み → 行UIを初期生成
 # ---------------------------------------------------------------------------
 @app.callback(
@@ -570,22 +678,23 @@ def on_suggestion_click(n_clicks_list):
     Output("cursor-a-store", "data", allow_duplicate=True),
     Output("cursor-b-store", "data", allow_duplicate=True),
     Output("ch-settings-container", "children"),
+    Output("config-path-input", "value"),
     Input("load-btn", "n_clicks"),
     State("file-path-input", "value"),
     prevent_initial_call=True,
 )
 def load_file(n_clicks, file_path):
     if not n_clicks or not file_path:
-        return (no_update,) * 7
+        return (no_update,) * 8
 
     path = Path(file_path)
 
     if not path.exists():
-        return no_update, "❌ ファイルが見つかりません", no_update, no_update, no_update, no_update, no_update
+        return no_update, "❌ ファイルが見つかりません", no_update, no_update, no_update, no_update, no_update, no_update
     if path.is_dir():
-        return no_update, "❌ ディレクトリです", no_update, no_update, no_update, no_update, no_update
+        return no_update, "❌ ディレクトリです", no_update, no_update, no_update, no_update, no_update, no_update
     if path.suffix.lower() != ".parquet":
-        return no_update, "❌ .parquet を指定してください", no_update, no_update, no_update, no_update, no_update
+        return no_update, "❌ .parquet を指定してください", no_update, no_update, no_update, no_update, no_update, no_update
 
     global df, channels
     df = pd.read_parquet(path)
@@ -594,7 +703,7 @@ def load_file(n_clicks, file_path):
     if not channels:
         df = None
         channels = []
-        return no_update, "❌ 波形チャンネルがありません", no_update, no_update, no_update, no_update, no_update
+        return no_update, "❌ 波形チャンネルがありません", no_update, no_update, no_update, no_update, no_update, no_update
 
     n = len(df)
     ts = df["time"].iloc[1] - df["time"].iloc[0]
@@ -607,6 +716,9 @@ def load_file(n_clicks, file_path):
     # チャンネル設定パネル生成（初期行に割り当てたchだけ表示）
     ch_settings = make_ch_settings(initial_channels)
 
+    # 作図ファイルのデフォルトパス（データと同じディレクトリ）
+    default_config_path = str(path.parent / (path.stem + ".pyc.json"))
+
     return (
         {"path": str(path), "channels": channels},
         status,
@@ -615,6 +727,251 @@ def load_file(n_clicks, file_path):
         None,
         None,
         ch_settings,
+        default_config_path,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Callback: 作図設定を保存
+# ---------------------------------------------------------------------------
+@app.callback(
+    Output("config-status", "children"),
+    Input("save-plotconfig-btn", "n_clicks"),
+    State("config-path-input", "value"),
+    State("file-path-input", "value"),
+    State({"type": "row-dropdown", "index": ALL}, "value"),
+    State({"type": "ymin-input", "index": ALL}, "value"),
+    State({"type": "ymax-input", "index": ALL}, "value"),
+    State({"type": "step-channels", "index": ALL}, "value"),
+    State({"type": "ch-color", "ch": ALL}, "value"),
+    State({"type": "ch-width", "ch": ALL}, "value"),
+    State({"type": "ch-color", "ch": ALL}, "id"),
+    State("theme-store", "data"),
+    State("scroll-zoom-store", "data"),
+    prevent_initial_call=True,
+)
+def save_plotconfig(
+    n_clicks, config_path, data_path,
+    all_values, all_ymin, all_ymax, all_step,
+    all_colors, all_widths, all_color_ids,
+    theme, scroll_zoom,
+):
+    if not n_clicks:
+        return no_update
+    if not config_path:
+        return "❌ 保存先パスを指定してください"
+
+    rows = []
+    for i, chs in enumerate(all_values or []):
+        if chs:
+            rows.append({
+                "channels": chs,
+                "ymin": all_ymin[i] if all_ymin and i < len(all_ymin) else None,
+                "ymax": all_ymax[i] if all_ymax and i < len(all_ymax) else None,
+                "step_channels": list(
+                    all_step[i] if all_step and i < len(all_step) and all_step[i] else []
+                ),
+            })
+
+    ch_styles = {}
+    for i, cid in enumerate(all_color_ids or []):
+        ch_styles[cid["ch"]] = {
+            "color": all_colors[i] if all_colors and i < len(all_colors) else TRACE_COLORS[0],
+            "width": all_widths[i] if all_widths and i < len(all_widths) and all_widths[i] else 1,
+        }
+
+    config = {
+        "version": 1,
+        "data_path": data_path or "",
+        "rows": rows,
+        "ch_styles": ch_styles,
+        "theme": theme or DEFAULT_THEME,
+        "scroll_zoom": bool(scroll_zoom),
+    }
+
+    try:
+        save_path = Path(config_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        save_path.write_text(
+            json.dumps(config, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return f"✓ 保存: {save_path.name}"
+    except Exception as e:
+        return f"❌ 保存失敗: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Callback: 作図設定をロード（データ + UI + 波形を一括復元）
+# ---------------------------------------------------------------------------
+@app.callback(
+    Output("file-path-input", "value", allow_duplicate=True),
+    Output("config-status", "children", allow_duplicate=True),
+    Output("data-store", "data", allow_duplicate=True),
+    Output("load-status", "children", allow_duplicate=True),
+    Output("rows-container", "children", allow_duplicate=True),
+    Output("row-count", "data", allow_duplicate=True),
+    Output("ch-settings-container", "children", allow_duplicate=True),
+    Output("cursor-a-store", "data", allow_duplicate=True),
+    Output("cursor-b-store", "data", allow_duplicate=True),
+    Output("waveform-container", "children", allow_duplicate=True),
+    Output("row-groups-store", "data", allow_duplicate=True),
+    Output("theme-store", "data", allow_duplicate=True),
+    Output("theme-toggle-btn", "children", allow_duplicate=True),
+    Output("app-root", "className", allow_duplicate=True),
+    Output("scroll-zoom-store", "data", allow_duplicate=True),
+    Output("scroll-zoom-btn", "children", allow_duplicate=True),
+    Output("scroll-zoom-btn", "style", allow_duplicate=True),
+    Input("load-plotconfig-btn", "n_clicks"),
+    State("config-path-input", "value"),
+    prevent_initial_call=True,
+)
+def load_plotconfig(n_clicks, config_path):
+    noop = (no_update,) * 17
+
+    if not n_clicks or not config_path:
+        return noop
+
+    cfg_path = Path(config_path)
+    if not cfg_path.exists():
+        return (no_update, "❌ ファイルが見つかりません") + (no_update,) * 15
+
+    try:
+        config = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return (no_update, f"❌ 読み込み失敗: {e}") + (no_update,) * 15
+
+    # データロード
+    data_path_str = config.get("data_path", "")
+    data_path = Path(data_path_str)
+
+    if not data_path.exists():
+        return (no_update, f"❌ データが見つかりません: {data_path.name}") + (no_update,) * 15
+
+    global df, channels
+    df = pd.read_parquet(data_path)
+    channels = [col for col in df.columns if col != "time"]
+
+    if not channels:
+        df = None
+        channels = []
+        return (no_update, "❌ 波形チャンネルがありません") + (no_update,) * 15
+
+    n = len(df)
+    ts = df["time"].iloc[1] - df["time"].iloc[0]
+    load_status = f"✓ {data_path.name} ({len(channels)} ch, {n:,} 点, {1/ts:,.0f} Hz)"
+
+    # 設定を取得
+    rows_cfg = config.get("rows", [])
+    ch_styles_cfg = config.get("ch_styles", {})
+    theme = config.get("theme", DEFAULT_THEME)
+    scroll_zoom = config.get("scroll_zoom", False)
+
+    # 行UIを生成（チャンネル選択値付き）
+    row_divs = []
+    for i, row in enumerate(rows_cfg):
+        chs = [ch for ch in row.get("channels", []) if ch in channels]
+        step_chs = [ch for ch in row.get("step_channels", []) if ch in channels]
+        row_divs.append(make_dropdown_row(i, selected=chs, step_selected=step_chs))
+    if not row_divs:
+        row_divs = [make_dropdown_row(i, [ch]) for i, ch in enumerate(channels[:8])]
+
+    # チャンネル設定パネル（スタイル付き）
+    used_chs = []
+    seen = set()
+    for row in rows_cfg:
+        for ch in row.get("channels", []):
+            if ch in channels and ch not in seen:
+                used_chs.append(ch)
+                seen.add(ch)
+    if not used_chs:
+        used_chs = channels[:8]
+    ch_settings = make_ch_settings(used_chs, ch_styles_cfg)
+
+    # 波形を直接描画
+    row_groups = []
+    ymin_list = []
+    ymax_list = []
+    step_list = []
+    for row in rows_cfg:
+        chs = [ch for ch in row.get("channels", []) if ch in channels]
+        if chs:
+            row_groups.append(chs)
+            ymin_list.append(row.get("ymin"))
+            ymax_list.append(row.get("ymax"))
+            step_list.append(
+                set(ch for ch in row.get("step_channels", []) if ch in channels)
+            )
+
+    waveform_rows = []
+    if row_groups:
+        waveform_rows.append(html.Div([
+            html.Div("Channel / Value",
+                     id="wf-header-label",
+                     className="wf-label-col wf-label-col-header",
+                     style={"padding": "4px 14px", "fontSize": "11px",
+                            "color": "var(--text-muted)"}),
+            html.Div("Waveform", style={
+                "flex": "1", "padding": "4px 12px",
+                "color": "var(--text-muted)", "fontSize": "11px",
+                "fontFamily": "monospace",
+            }),
+        ], style={
+            "display": "flex", "backgroundColor": "var(--bg-header)",
+            "borderBottom": "1px solid var(--border)",
+        }))
+        for i, group in enumerate(row_groups):
+            waveform_rows.append(waveform_row(
+                i, group,
+                is_last=(i == len(row_groups) - 1),
+                scroll_zoom=scroll_zoom,
+                ymin=ymin_list[i],
+                ymax=ymax_list[i],
+                step_chs=step_list[i],
+                ch_styles=ch_styles_cfg,
+                theme=theme,
+            ))
+
+    # テーマ状態
+    theme_icon = "🌙" if theme == "dark" else "☀️"
+    app_cls = f"app-container theme-{theme}"
+
+    # スクロールズームボタン状態
+    if scroll_zoom:
+        zoom_label = "🔓 スケール解除"
+        zoom_style = {
+            "marginLeft": "16px", "padding": "6px 12px",
+            "backgroundColor": "#333", "color": "#aaa",
+            "border": "1px solid #555", "borderRadius": "4px",
+            "cursor": "pointer", "whiteSpace": "nowrap",
+        }
+    else:
+        zoom_label = "🔒 スケール固定"
+        zoom_style = {
+            "marginLeft": "16px", "padding": "6px 12px",
+            "backgroundColor": "#4fc3f7", "color": "#000",
+            "border": "1px solid #4fc3f7", "borderRadius": "4px",
+            "cursor": "pointer", "whiteSpace": "nowrap", "fontWeight": "bold",
+        }
+
+    return (
+        data_path_str,
+        f"✓ 作図ロード: {cfg_path.name}",
+        {"path": str(data_path), "channels": channels},
+        load_status,
+        row_divs,
+        len(row_divs),
+        ch_settings,
+        None,
+        None,
+        waveform_rows,
+        row_groups,
+        theme,
+        theme_icon,
+        app_cls,
+        scroll_zoom,
+        zoom_label,
+        zoom_style,
     )
 
 
