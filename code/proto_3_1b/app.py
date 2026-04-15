@@ -1198,7 +1198,6 @@ def toggle_measure(n_clicks):
     Output("row-groups-store", "data"),
     Output("ch-settings-container", "children", allow_duplicate=True),
     Input("update-btn", "n_clicks"),
-    Input("scroll-zoom-store", "data"),
     State({"type": "row-dropdown", "index": ALL}, "value"),
     State({"type": "ymin-input", "index": ALL}, "value"),
     State({"type": "ymax-input", "index": ALL}, "value"),
@@ -1207,11 +1206,12 @@ def toggle_measure(n_clicks):
     State({"type": "ch-width", "ch": ALL}, "value"),
     State({"type": "ch-color", "ch": ALL}, "id"),
     State("xaxis-range-store", "data"),
+    State("scroll-zoom-store", "data"),
     prevent_initial_call=True,
 )
 def update_waveform_rows(
-    n_clicks, scroll_zoom, all_values, all_ymin, all_ymax, all_step,
-    all_colors, all_widths, all_color_ids, x_range,
+    n_clicks, all_values, all_ymin, all_ymax, all_step,
+    all_colors, all_widths, all_color_ids, x_range, scroll_zoom,
 ):
     """ドロップダウンの値から波形行を生成する。"""
     if not all_values:
@@ -1367,12 +1367,33 @@ def store_xaxis_range(relayout_datas):
 
 
 # ---------------------------------------------------------------------------
-# Callback: 全グラフ更新（スパイクライン + ズーム同期 + カーソル線）
+# Callback: スクロールズーム設定を全グラフへ反映（config更新）
+# ---------------------------------------------------------------------------
+@app.callback(
+    Output({"type": "wf-graph", "row": ALL}, "config"),
+    Input("scroll-zoom-store", "data"),
+    State({"type": "wf-graph", "row": ALL}, "id"),
+    prevent_initial_call=True,
+)
+def update_graph_configs(scroll_zoom, graph_ids):
+    if not graph_ids:
+        return []
+
+    return [{
+        "scrollZoom": bool(scroll_zoom),
+        "displayModeBar": "hover",
+        "modeBarButtonsToRemove": ["select2d", "lasso2d"],
+    } for _ in graph_ids]
+
+
+# ---------------------------------------------------------------------------
+# Callback: 全グラフ更新（スパイクライン + ズーム同期 + スクロールズーム + カーソル線）
 # ---------------------------------------------------------------------------
 @app.callback(
     Output({"type": "wf-graph", "row": ALL}, "figure"),
     Input("hover-x-store", "data"),
     Input("xaxis-range-store", "data"),
+    Input("scroll-zoom-store", "data"),
     Input("cursor-a-store", "data"),
     Input("cursor-b-store", "data"),
     State({"type": "wf-graph", "row": ALL}, "id"),
@@ -1381,25 +1402,25 @@ def store_xaxis_range(relayout_datas):
     State({"type": "ch-color", "ch": ALL}, "value"),
     State({"type": "ch-width", "ch": ALL}, "value"),
     State({"type": "ch-color", "ch": ALL}, "id"),
-    State("scroll-zoom-store", "data"),
     State({"type": "ymin-input", "index": ALL}, "value"),
     State({"type": "ymax-input", "index": ALL}, "value"),
     State("theme-store", "data"),
     prevent_initial_call=True,
 )
 def update_graphs(
-    x_hover, xaxis_range, cursor_a, cursor_b, graph_ids,
+    x_hover, xaxis_range, scroll_zoom, cursor_a, cursor_b, graph_ids,
     row_groups, all_step, all_colors, all_widths, all_color_ids,
-    scroll_zoom, all_ymin, all_ymax, theme,
+    all_ymin, all_ymax, theme,
 ):
     if not graph_ids:
         return []
 
-    # ズーム変更がトリガーの場合、表示点数に応じてトレースを再描画
+    # ズーム変更/スクロールズーム切替がトリガーの場合、トレースを再描画
     triggered = [t["prop_id"] for t in ctx.triggered]
     zoom_changed = any("xaxis-range-store" in t for t in triggered)
+    scroll_changed = any("scroll-zoom-store" in t for t in triggered)
 
-    if zoom_changed and row_groups and df is not None:
+    if (zoom_changed or scroll_changed) and row_groups and df is not None:
         # チャンネルスタイル辞書を構築
         ch_styles = {}
         for i, cid in enumerate(all_color_ids or []):
