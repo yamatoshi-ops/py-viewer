@@ -1379,12 +1379,11 @@ def update_graph_configs(scroll_zoom, graph_ids):
     if not graph_ids:
         return []
 
-    config = {
+    return [{
         "scrollZoom": bool(scroll_zoom),
         "displayModeBar": "hover",
         "modeBarButtonsToRemove": ["select2d", "lasso2d"],
-    }
-    return [config for _ in graph_ids]
+    } for _ in graph_ids]
 
 
 # ---------------------------------------------------------------------------
